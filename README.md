@@ -1,26 +1,12 @@
 # jwksproxy
 
-`jwksproxy` is a tiny Axum service for publishing a minimal OpenID-style discovery document and proxying the Kubernetes service account JWKS from the cluster it runs in.
+The purpose of this project is to provide a dead simple mechanism for making the token signing keys from a Kubernetes
+cluster available publicly. Many Kubernetes clusters have mechanisms for setting up a TLS encrypted HTTP endpoint, but
+no clear way of making the signing keys available to clients, which can cause problems when integrating cluster-issued
+workload identities with external services.
 
-## API
-
-```sh
-curl http://localhost:8080/.well-known/openid-configuration
-```
-
-returns:
-
-```json
-{ "jwks_uri": "https://jwksproxy.example.com/jwks.json" }
-```
-
-At startup, `jwksproxy` reads the cluster OpenID configuration from:
-
-```text
-https://{kubernetes_api_endpoint}/.well-known/openid-configuration
-```
-
-It extracts that document's `jwks_uri`, fetches the cluster JWKS, and serves the cached key set from `/jwks.json`. Once `max_key_age` has elapsed, the next `/jwks.json` request refreshes the cache from the discovered `jwks_uri` before returning a response. If a refresh fails, `jwksproxy` logs the error and returns the last cached JWKS.
+jwksproxy is designed to be performant and easy to set up. The only necessary option is origin, matching the hostname
+that is used to connect to the service. 
 
 ## Configuration
 
