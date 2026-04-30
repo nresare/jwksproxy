@@ -8,6 +8,7 @@ mod kubernetes;
 use crate::config::Config;
 use crate::error::AppError;
 use anyhow::Context;
+use arc_swap::ArcSwap;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, StatusCode, header};
@@ -18,7 +19,7 @@ use clap::Parser;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 use tower_http::trace::{self, TraceLayer};
 use tracing::Level;
@@ -46,7 +47,7 @@ struct Cli {
 struct AppState {
     config: Arc<Config>,
     client: reqwest::Client,
-    jwks_cache: Arc<Mutex<CachedJwks>>,
+    jwks_cache: Arc<ArcSwap<CachedJwks>>,
 }
 
 #[derive(Clone)]
@@ -111,7 +112,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let state = AppState {
         config: Arc::new(config),
         client,
-        jwks_cache: Arc::new(Mutex::new(jwks_cache)),
+        jwks_cache: Arc::new(ArcSwap::from_pointee(jwks_cache)),
     };
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -141,26 +142,15 @@ async fn openid_config(State(state): State<AppState>) -> Json<Value> {
 }
 
 async fn keys(State(state): State<AppState>) -> Result<Response, AppError> {
-    let (jwks_uri, should_refresh) = {
-        let cache = state
-            .jwks_cache
-            .lock()
-            .map_err(|_| AppError::Internal("JWKS cache lock is poisoned".to_string()))?;
-        (
-            cache.jwks_uri.clone(),
-            cache.fetched_at.elapsed() >= state.config.max_key_age,
-        )
-    };
+    let cache = state.jwks_cache.load_full();
+    let jwks_uri = cache.jwks_uri.clone();
+    let should_refresh = cache.fetched_at.elapsed() >= state.config.max_key_age;
 
     if should_refresh {
         debug!(cluster_jwks_uri = %jwks_uri, "refreshing cached cluster JWKS");
         match fetch_jwks(&state.client, &jwks_uri).await {
             Ok(refreshed_cache) => {
-                let mut cache = state
-                    .jwks_cache
-                    .lock()
-                    .map_err(|_| AppError::Internal("JWKS cache lock is poisoned".to_string()))?;
-                *cache = refreshed_cache;
+                state.jwks_cache.store(Arc::new(refreshed_cache));
             }
             Err(error) => {
                 warn!(error = %error, cluster_jwks_uri = %jwks_uri, "failed to refresh cluster JWKS; returning stale cache");
@@ -168,11 +158,7 @@ async fn keys(State(state): State<AppState>) -> Result<Response, AppError> {
         }
     }
 
-    let cache = state
-        .jwks_cache
-        .lock()
-        .map_err(|_| AppError::Internal("JWKS cache lock is poisoned".to_string()))?
-        .clone();
+    let cache = state.jwks_cache.load_full();
     cached_jwks_response(&cache)
 }
 
