@@ -1,0 +1,11 @@
+bind_address = "0.0.0.0:8080"
+
+# The public host name clients use to reach jwksproxy.
+# /.well-known/openid-configuration returns https://{origin}/jwks.json.
+origin = "jwksproxy.example.com"
+
+# The Kubernetes API server host for the cluster jwksproxy runs in.
+kubernetes_api_endpoint = "kubernetes.default.svc"
+
+# How long to cache the cluster JWKS before refreshing it from the discovered jwks_uri.
+max_key_age = "1h"

@@ -1,0 +1,15 @@
+target
+.git
+.gitignore
+.dockerignore
+
+# Local/editor noise
+.DS_Store
+.idea
+.vscode
+*.swp
+*.swo
+
+# Local configuration and logs
+*.log
+jwksproxy.toml
