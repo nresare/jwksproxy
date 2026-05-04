@@ -133,7 +133,10 @@ async fn healthz() -> Json<Value> {
 }
 
 async fn openid_config(State(state): State<AppState>) -> Json<Value> {
-    Json(json!({ "jwks_uri": state.config.jwks_uri() }))
+    Json(json!({
+        "issuer": state.config.issuer(),
+        "jwks_uri": state.config.jwks_uri(),
+    }))
 }
 
 async fn keys(State(state): State<AppState>) -> Result<Response, AppError> {

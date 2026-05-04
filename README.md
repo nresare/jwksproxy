@@ -17,7 +17,7 @@ kubernetes_api_endpoint = "kubernetes.default.svc"
 max_key_age = "1h"
 ```
 
-`origin` is the public host name clients use to reach `jwksproxy`, without a URL scheme. The discovery document at `/.well-known/openid-configuration` returns `https://{origin}/jwks.json`.
+`origin` is the public host name clients use to reach `jwksproxy`, without a URL scheme. The discovery document at `/.well-known/openid-configuration` returns `https://{origin}` as the issuer and `https://{origin}/jwks.json` as the JWKS URI.
 
 `kubernetes_api_endpoint` is the Kubernetes API server host, without a URL scheme. It defaults to `kubernetes.default.svc`.
 
@@ -37,4 +37,5 @@ cargo run -- --config-file jwksproxy.toml.example --debug
 
 ## Kubernetes
 
-When running in a pod, `jwksproxy` uses the mounted service account CA bundle and bearer token when calling the Kubernetes API server. The default `/openid/v1/jwks` endpoint is normally served by Kubernetes service account issuer discovery.
+When running in a pod, `jwksproxy` uses the mounted service account CA bundle and bearer token when calling the
+Kubernetes API server.
