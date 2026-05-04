@@ -58,6 +58,10 @@ impl Config {
         format!("https://{}/jwks.json", self.origin)
     }
 
+    pub fn issuer(&self) -> String {
+        format!("https://{}", self.origin)
+    }
+
     pub fn cluster_openid_config_endpoint(&self) -> String {
         format!(
             "https://{}/.well-known/openid-configuration",
@@ -153,6 +157,7 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.bind_address, "0.0.0.0:8080");
         assert_eq!(config.origin, "localhost:8080");
+        assert_eq!(config.issuer(), "https://localhost:8080");
         assert_eq!(config.jwks_uri(), "https://localhost:8080/jwks.json");
         assert_eq!(config.kubernetes_api_endpoint, "kubernetes.default.svc");
         assert_eq!(
@@ -205,6 +210,19 @@ origin = "issuer.example.com"
 
         config.validate().unwrap();
         assert_eq!(config.jwks_uri(), "https://issuer.example.com/jwks.json");
+    }
+
+    #[test]
+    fn derives_issuer_from_origin() {
+        let config: Config = toml::from_str(
+            r#"
+origin = "issuer.example.com"
+"#,
+        )
+        .unwrap();
+
+        config.validate().unwrap();
+        assert_eq!(config.issuer(), "https://issuer.example.com");
     }
 
     #[test]
