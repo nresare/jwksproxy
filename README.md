@@ -17,7 +17,7 @@ kubernetes_api_endpoint = "kubernetes.default.svc"
 max_key_age = "1h"
 ```
 
-`origin` is the public host name clients use to reach `jwksproxy`, without a URL scheme. The discovery document at `/.well-known/openid-configuration` returns `https://{origin}` as the issuer and `https://{origin}/jwks.json` as the JWKS URI.
+`origin` is the public host name clients use to reach `jwksproxy`, without a URL scheme. The discovery document at `/.well-known/openid-configuration` returns `https://{origin}` as the issuer, `https://{origin}/jwks.json` as the JWKS URI, and the OIDC metadata required by AWS IAM for an OIDC identity provider.
 
 `kubernetes_api_endpoint` is the Kubernetes API server host, without a URL scheme. It defaults to `kubernetes.default.svc`.
 
