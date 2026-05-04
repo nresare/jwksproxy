@@ -15,7 +15,7 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
 use clap::Parser;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -28,6 +28,11 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const CLAIMS_SUPPORTED: &[&str] = &["aud", "exp", "iat", "iss", "jti", "nbf", "sub"];
+const ID_TOKEN_SIGNING_ALG_VALUES_SUPPORTED: &[&str] =
+    &["RS256", "RS384", "RS512", "ES256", "ES384", "ES512"];
+const RESPONSE_TYPES_SUPPORTED: &[&str] = &["id_token"];
+const SUBJECT_TYPES_SUPPORTED: &[&str] = &["public"];
 
 #[derive(Parser)]
 struct Cli {
@@ -59,6 +64,16 @@ struct CachedJwks {
 #[derive(Deserialize)]
 struct ClusterOpenidConfig {
     jwks_uri: String,
+}
+
+#[derive(Serialize)]
+struct OpenidConfig {
+    issuer: String,
+    jwks_uri: String,
+    claims_supported: &'static [&'static str],
+    id_token_signing_alg_values_supported: &'static [&'static str],
+    response_types_supported: &'static [&'static str],
+    subject_types_supported: &'static [&'static str],
 }
 
 #[tokio::main]
@@ -132,11 +147,19 @@ async fn healthz() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
 
-async fn openid_config(State(state): State<AppState>) -> Json<Value> {
-    Json(json!({
-        "issuer": state.config.issuer(),
-        "jwks_uri": state.config.jwks_uri(),
-    }))
+async fn openid_config(State(state): State<AppState>) -> Json<OpenidConfig> {
+    Json(openid_config_document(&state.config))
+}
+
+fn openid_config_document(config: &Config) -> OpenidConfig {
+    OpenidConfig {
+        issuer: config.issuer(),
+        jwks_uri: config.jwks_uri(),
+        claims_supported: CLAIMS_SUPPORTED,
+        id_token_signing_alg_values_supported: ID_TOKEN_SIGNING_ALG_VALUES_SUPPORTED,
+        response_types_supported: RESPONSE_TYPES_SUPPORTED,
+        subject_types_supported: SUBJECT_TYPES_SUPPORTED,
+    }
 }
 
 async fn keys(State(state): State<AppState>) -> Result<Response, AppError> {
@@ -203,4 +226,41 @@ fn cached_jwks_response(cache: &CachedJwks) -> Result<Response, AppError> {
     Response::builder()
         .body(Body::from(cache.body.clone()))
         .map_err(|error| AppError::Internal(format!("failed to build JWKS response: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, openid_config_document};
+    use serde_json::json;
+
+    #[test]
+    fn openid_config_includes_aws_oidc_prerequisite_fields() {
+        let config = Config {
+            bind_address: "0.0.0.0:8080".to_string(),
+            origin: "issuer.example.com".to_string(),
+            kubernetes_api_endpoint: "kubernetes.default.svc".to_string(),
+            max_key_age: std::time::Duration::from_secs(3600),
+        };
+
+        let document = serde_json::to_value(openid_config_document(&config)).unwrap();
+
+        assert_eq!(
+            document,
+            json!({
+                "issuer": "https://issuer.example.com",
+                "jwks_uri": "https://issuer.example.com/jwks.json",
+                "claims_supported": ["aud", "exp", "iat", "iss", "jti", "nbf", "sub"],
+                "id_token_signing_alg_values_supported": [
+                    "RS256",
+                    "RS384",
+                    "RS512",
+                    "ES256",
+                    "ES384",
+                    "ES512"
+                ],
+                "response_types_supported": ["id_token"],
+                "subject_types_supported": ["public"]
+            })
+        );
+    }
 }
