@@ -2,6 +2,7 @@ target
 .git
 .gitignore
 .dockerignore
+.deploy
 
 # Local/editor noise
 .DS_Store
