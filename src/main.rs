@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: The jwksproxy contributors
 
+mod certificates;
 mod config;
 mod error;
 mod kubernetes;
@@ -51,6 +52,7 @@ struct Cli {
 struct AppState {
     config: Arc<Config>,
     client: reqwest::Client,
+    certificates: Arc<certificates::Certificates>,
     jwks_cache: Arc<ArcSwap<CachedJwks>>,
 }
 
@@ -103,13 +105,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let bind_address: SocketAddr = config.bind_address.parse()?;
     let client = kubernetes::configure_in_cluster_client(reqwest::Client::builder())?.build()?;
 
+    let certificates = Arc::new(certificates::Certificates::new(config.emit_x5c)?);
     let cluster_openid_config_endpoint = config.cluster_openid_config_endpoint();
     let jwks_uri = discover_cluster_jwks_uri(&client, &cluster_openid_config_endpoint)
         .await
         .with_context(|| {
             format!("failed to discover cluster JWKS URI from '{cluster_openid_config_endpoint}'")
         })?;
-    let jwks_cache = fetch_jwks(&client, &jwks_uri)
+    let jwks_cache = fetch_jwks(&client, &jwks_uri, &certificates)
         .await
         .with_context(|| format!("failed to fetch cluster JWKS from '{jwks_uri}'"))?;
 
@@ -124,6 +127,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let state = AppState {
         config: Arc::new(config),
         client,
+        certificates,
         jwks_cache: Arc::new(ArcSwap::from_pointee(jwks_cache)),
     };
     let app = Router::new()
@@ -169,7 +173,7 @@ async fn keys(State(state): State<AppState>) -> Result<Response, AppError> {
 
     if should_refresh {
         debug!(cluster_jwks_uri = %jwks_uri, "refreshing cached cluster JWKS");
-        match fetch_jwks(&state.client, &jwks_uri).await {
+        match fetch_jwks(&state.client, &jwks_uri, &state.certificates).await {
             Ok(refreshed_cache) => {
                 state.jwks_cache.store(Arc::new(refreshed_cache));
             }
@@ -207,7 +211,11 @@ async fn discover_cluster_jwks_uri(
     Ok(discovery.jwks_uri)
 }
 
-async fn fetch_jwks(client: &reqwest::Client, jwks_uri: &str) -> anyhow::Result<CachedJwks> {
+async fn fetch_jwks(
+    client: &reqwest::Client,
+    jwks_uri: &str,
+    certificates: &certificates::Certificates,
+) -> anyhow::Result<CachedJwks> {
     let upstream_response = client.get(jwks_uri).send().await?;
     let status = upstream_response.status();
     if status != reqwest::StatusCode::OK {
@@ -217,7 +225,7 @@ async fn fetch_jwks(client: &reqwest::Client, jwks_uri: &str) -> anyhow::Result<
 
     Ok(CachedJwks {
         jwks_uri: jwks_uri.to_string(),
-        body: upstream_body,
+        body: certificates.transform(&upstream_body)?.into(),
         fetched_at: Instant::now(),
     })
 }
@@ -236,6 +244,7 @@ mod tests {
     #[test]
     fn openid_config_includes_aws_oidc_prerequisite_fields() {
         let config = Config {
+            emit_x5c: false,
             bind_address: "0.0.0.0:8080".to_string(),
             origin: "issuer.example.com".to_string(),
             kubernetes_api_endpoint: "kubernetes.default.svc".to_string(),
