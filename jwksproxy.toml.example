@@ -11,3 +11,8 @@ origin = "jwksproxy.example.com"
 
 # How long to cache the cluster JWKS before refreshing it from the discovered jwks_uri.
 # max_key_age = "1h"
+
+# Experimental Ceph compatibility: attach certificates signed by an
+# in-memory EC P-256 issuer to upstream public keys.
+# Requires RGW JWKS URL verification and the correct endpoint thumbprint.
+# emit_x5c = false

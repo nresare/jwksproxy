@@ -6,6 +6,8 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub emit_x5c: bool,
     #[serde(default = "default_bind_address")]
     pub bind_address: String,
     #[serde(default = "default_origin")]
