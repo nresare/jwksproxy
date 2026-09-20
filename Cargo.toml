@@ -19,7 +19,7 @@ tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-base64 = "0.22"
+base64 = "0.23"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 p384 = { version = "0.13", default-features = false, features = ["arithmetic", "pkcs8", "std"] }
 p521 = { version = "0.13", default-features = false, features = ["arithmetic", "pkcs8", "std"] }
