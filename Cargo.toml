@@ -24,7 +24,7 @@ p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 p384 = { version = "0.13", default-features = false, features = ["arithmetic", "pkcs8", "std"] }
 p521 = { version = "0.13", default-features = false, features = ["arithmetic", "pkcs8", "std"] }
 rsa = "0.9"
-x509-cert = { version = "0.2", features = ["builder"] }
+x509-cert = { version = "0.3", features = ["builder"] }
 
 # Enable SHA-256 algorithm identifiers for X.509 ECDSA signatures.
 sha2 = { version = "0.10", features = ["oid"] }
