@@ -27,4 +27,4 @@ rsa = "0.9"
 x509-cert = { version = "0.2", features = ["builder"] }
 
 # Enable SHA-256 algorithm identifiers for X.509 ECDSA signatures.
-sha2 = { version = "0.10", features = ["oid"] }
+sha2 = { version = "0.11", features = ["oid"] }
