@@ -36,35 +36,6 @@ with TLS and `0.0.0.0:8080` otherwise; an explicit `bind_address` overrides eith
 one. Invalid, incomplete, or mismatched TLS settings fail startup before contacting
 the Kubernetes API.
 
-## Cluster deployment
-
-Main-branch commits use `.buildkite/pipelinegen.toml` to test and publish a container
-image, then notify relcoord. Relcoord reads `.deploy` from that same commit and
-writes manifests to the configured output repository for Argo CD to reconcile.
-The image comes from the build rather than a version pinned in system.
-
-The deployment keeps production's single replica, `origin = "k8s.noa.re"`, and
-`emit_x5c = true`. The system website plugin creates a cluster-local certificate
-mounted at `/tls`, HTTPS probes, a Service on port 443 targeting port 8443, and a
-BackendTLSPolicy that verifies the backend against the `cluster-local-ca` ConfigMap.
-The namespace's `trust: cluster-local` label makes trust-manager install that bundle.
-
-For the handoff from system:
-
-1. Keep the existing `jwksproxy/` manifests in fruktsallad throughout the switchover.
-   Removing `jwksproxy` from `owners/system.toml` is preparation, not confirmation
-   that Argo CD has adopted the deployment.
-2. Merge and deploy jwksproxy from its repository. Confirm `owners/jwksproxy.toml`
-   contains `owned = "jwksproxy"`, the generated image matches the build, and Argo CD
-   reports the workload synced and healthy. Verify the public discovery and JWKS
-   endpoints at `https://k8s.noa.re`.
-3. Only then merge the system cleanup that removes its `k8s.noa.re` website block
-   and `jwksproxy/jwksproxy.toml`.
-
-Avoid system deployments during the handoff: the old website block can reclaim
-ownership before jwksproxy's first deployment, then conflicts with its new owner
-until cleanup. The shared website plugin and TLS infrastructure remain in system.
-
 ## Running
 
 ```sh
