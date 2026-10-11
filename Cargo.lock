@@ -993,7 +993,7 @@ dependencies = [
  "arc-swap",
  "axum",
  "axum-server",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "p256",
  "p384",
