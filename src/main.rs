@@ -5,6 +5,7 @@ mod certificates;
 mod config;
 mod error;
 mod kubernetes;
+mod tls;
 
 use crate::config::Config;
 use crate::error::AppError;
@@ -15,12 +16,15 @@ use axum::extract::State;
 use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
+use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::net::TcpListener;
 use tower_http::trace::{self, TraceLayer};
 use tracing::Level;
 use tracing::{debug, error, info, warn};
@@ -102,7 +106,8 @@ async fn main() -> anyhow::Result<()> {
 async fn run(cli: Cli) -> anyhow::Result<()> {
     let config = Config::load(&cli.config_path)?;
     config.validate()?;
-    let bind_address: SocketAddr = config.bind_address.parse()?;
+    let bind_address: SocketAddr = config.bind_address().parse()?;
+    let tls = tls::load(&config, Path::new(&cli.config_path)).await?;
     let client = kubernetes::configure_in_cluster_client(reqwest::Client::builder())?.build()?;
 
     let certificates = Arc::new(certificates::Certificates::new(config.emit_x5c)?);
@@ -130,7 +135,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         certificates,
         jwks_cache: Arc::new(ArcSwap::from_pointee(jwks_cache)),
     };
-    let app = Router::new()
+    let app = build_router(state);
+    let listener = TcpListener::bind(bind_address).await?;
+    info!(address = %bind_address, "listening");
+    serve(listener, app, tls).await
+}
+
+fn build_router(state: AppState) -> Router {
+    Router::new()
         .route("/healthz", get(healthz))
         .route("/.well-known/openid-configuration", get(openid_config))
         .route("/jwks.json", get(keys))
@@ -139,11 +151,21 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 .make_span_with(trace::DefaultMakeSpan::new().level(Level::INFO))
                 .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
         )
-        .with_state(state);
+        .with_state(state)
+}
 
-    let listener = tokio::net::TcpListener::bind(bind_address).await?;
-    info!(address = %bind_address, "listening");
-    axum::serve(listener, app).await?;
+async fn serve(
+    listener: TcpListener,
+    app: Router,
+    tls: Option<RustlsConfig>,
+) -> anyhow::Result<()> {
+    if let Some(tls) = tls {
+        axum_server::from_tcp_rustls(listener.into_std()?, tls)?
+            .serve(app.into_make_service())
+            .await?;
+    } else {
+        axum::serve(listener, app).await?;
+    }
     Ok(())
 }
 
@@ -245,7 +267,9 @@ mod tests {
     fn openid_config_includes_aws_oidc_prerequisite_fields() {
         let config = Config {
             emit_x5c: false,
-            bind_address: "0.0.0.0:8080".to_string(),
+            bind_address: Some("0.0.0.0:8080".to_string()),
+            tls_cert_path: None,
+            tls_key_path: None,
             origin: "issuer.example.com".to_string(),
             kubernetes_api_endpoint: "kubernetes.default.svc".to_string(),
             max_key_age: std::time::Duration::from_secs(3600),
@@ -271,5 +295,116 @@ mod tests {
                 "subject_types_supported": ["public"]
             })
         );
+    }
+
+    #[tokio::test]
+    async fn serves_oidc_and_jwks_over_http_and_https() {
+        use super::*;
+        use rustls::pki_types::{CertificateDer, pem::PemObject};
+
+        for enabled in [false, true] {
+            let settings = if enabled {
+                "tls_cert_path = 'cert.pem'\ntls_key_path = 'test-only-key.pem'"
+            } else {
+                ""
+            };
+            let config: Config =
+                toml::from_str(&format!("{settings}\norigin = 'issuer.example.com'\n")).unwrap();
+            let tls = tls::load(
+                &config,
+                &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/tls/config.toml"),
+            )
+            .await
+            .unwrap();
+            if let Some(tls) = &tls {
+                assert_eq!(
+                    tls.get_inner().alpn_protocols,
+                    [b"h2".to_vec(), b"http/1.1".to_vec()]
+                );
+            }
+            let state = AppState {
+                config: Arc::new(config),
+                client: reqwest::Client::new(),
+                certificates: Arc::new(certificates::Certificates::new(false).unwrap()),
+                jwks_cache: Arc::new(ArcSwap::from_pointee(CachedJwks {
+                    jwks_uri: "https://kubernetes.default.svc/openid/v1/jwks".into(),
+                    body: Bytes::from_static(b"{\"keys\":[]}"),
+                    fetched_at: Instant::now(),
+                })),
+            };
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let task = tokio::spawn(serve(listener, build_router(state), tls));
+            for http2 in [false, true] {
+                if http2 && !enabled {
+                    continue;
+                }
+                let mut client = reqwest::Client::builder()
+                    .no_proxy()
+                    .resolve("localhost", address)
+                    .timeout(std::time::Duration::from_secs(5));
+                if enabled {
+                    let mut roots = rustls::RootCertStore::empty();
+                    roots
+                        .add(
+                            CertificateDer::from_pem_slice(include_bytes!("../tests/tls/cert.pem"))
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+                        rustls::crypto::ring::default_provider(),
+                    ))
+                    .with_safe_default_protocol_versions()
+                    .unwrap()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth();
+                    tls.alpn_protocols = if http2 {
+                        vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+                    } else {
+                        vec![b"http/1.1".to_vec()]
+                    };
+                    client = client.tls_backend_preconfigured(tls);
+                }
+                let client = if http2 {
+                    client.http2_prior_knowledge()
+                } else {
+                    client.http1_only()
+                }
+                .build()
+                .unwrap();
+                let scheme = if enabled { "https" } else { "http" };
+                for path in [
+                    "/healthz",
+                    "/.well-known/openid-configuration",
+                    "/jwks.json",
+                ] {
+                    let response = client
+                        .get(format!("{scheme}://localhost:{}{path}", address.port()))
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), reqwest::StatusCode::OK);
+                    assert_eq!(
+                        response.version(),
+                        if http2 {
+                            reqwest::Version::HTTP_2
+                        } else {
+                            reqwest::Version::HTTP_11
+                        }
+                    );
+                    let body: Value = response.json().await.unwrap();
+                    match path {
+                        "/healthz" => assert_eq!(body, json!({"status":"ok"})),
+                        "/jwks.json" => assert_eq!(body, json!({"keys":[]})),
+                        _ => {
+                            assert_eq!(body["issuer"], "https://issuer.example.com");
+                            assert_eq!(body["jwks_uri"], "https://issuer.example.com/jwks.json");
+                        }
+                    }
+                }
+            }
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
     }
 }

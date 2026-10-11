@@ -1,5 +1,6 @@
 [[website]]
 name = "k8s.noa.re"
 namespace = "jwksproxy"
-replicas = 2
+replicas = 1
+tls = true
 config = { "/config/jwksproxy.toml" = "jwksproxy.toml" }

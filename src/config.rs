@@ -8,8 +8,9 @@ use std::time::Duration;
 pub struct Config {
     #[serde(default)]
     pub emit_x5c: bool,
-    #[serde(default = "default_bind_address")]
-    pub bind_address: String,
+    pub bind_address: Option<String>,
+    pub tls_cert_path: Option<String>,
+    pub tls_key_path: Option<String>,
     #[serde(default = "default_origin")]
     pub origin: String,
     #[serde(
@@ -25,6 +26,16 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn bind_address(&self) -> &str {
+        self.bind_address
+            .as_deref()
+            .unwrap_or(if self.tls_cert_path.is_some() {
+                "0.0.0.0:8443"
+            } else {
+                "0.0.0.0:8080"
+            })
+    }
+
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Could not read config file '{path}'"))?;
@@ -33,7 +44,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.bind_address.is_empty() {
+        if self.bind_address().is_empty() {
             anyhow::bail!("bind_address must not be empty");
         }
         if self.origin.is_empty() {
@@ -70,10 +81,6 @@ impl Config {
             self.kubernetes_api_endpoint
         )
     }
-}
-
-fn default_bind_address() -> String {
-    "0.0.0.0:8080".to_string()
 }
 
 fn default_origin() -> String {
@@ -157,7 +164,7 @@ mod tests {
         let config: Config = toml::from_str("").unwrap();
 
         config.validate().unwrap();
-        assert_eq!(config.bind_address, "0.0.0.0:8080");
+        assert_eq!(config.bind_address(), "0.0.0.0:8080");
         assert_eq!(config.origin, "localhost:8080");
         assert_eq!(config.issuer(), "https://localhost:8080");
         assert_eq!(config.jwks_uri(), "https://localhost:8080/jwks.json");

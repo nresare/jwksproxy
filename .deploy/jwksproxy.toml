@@ -1,1 +1,4 @@
 origin = "k8s.noa.re"
+emit_x5c = true
+tls_cert_path = "/tls/tls.crt"
+tls_key_path = "/tls/tls.key"
