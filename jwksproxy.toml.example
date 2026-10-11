@@ -1,5 +1,9 @@
-# The address and port to listen on for HTTP requests.
+# Optional listen address: defaults to port 8080 for HTTP, or 8443 with TLS.
 # bind_address = "0.0.0.0:8080"
+
+# Enable HTTPS with both PEM files. Relative paths resolve from this config file.
+# tls_cert_path = "tls/cert.pem"
+# tls_key_path = "tls/key.pem"
 
 # The public host name clients use to reach jwksproxy. This needs to be set
 # /.well-known/openid-configuration returns https://{origin} as issuer and
