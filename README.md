@@ -55,6 +55,10 @@ Use `--debug` for request-flow logs:
 cargo run -- --config-file jwksproxy.toml.example --debug
 ```
 
+On SIGTERM or SIGINT, the server stops accepting connections and allows active
+requests up to 25 seconds to finish. Shutdown signals also cancel startup while
+the proxy is discovering or fetching upstream keys.
+
 ## Kubernetes
 
 When running in a pod, `jwksproxy` uses the mounted service account CA bundle and bearer token when calling the
