@@ -6,7 +6,16 @@ use anyhow::{Context, bail};
 use axum_server::tls_rustls::RustlsConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
+
+pub fn install_crypto_provider() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        rustls_graviola::default_provider()
+            .install_default()
+            .expect("could not install Graviola TLS crypto provider");
+    });
+}
 
 fn file_paths(config: &Config, config_path: &Path) -> anyhow::Result<Option<(PathBuf, PathBuf)>> {
     let (cert, key) = match (&config.tls_cert_path, &config.tls_key_path) {
@@ -29,9 +38,8 @@ pub async fn load(config: &Config, config_path: &Path) -> anyhow::Result<Option<
             .context("Could not parse TLS certificate chain")?;
         let key = PrivateKeyDer::from_pem_file(&key_path)
             .with_context(|| format!("Could not read TLS private key {}", key_path.display()))?;
-        // Select the provider explicitly: other dependencies also enable aws-lc-rs.
         let mut server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
+            rustls_graviola::default_provider(),
         ))
         .with_safe_default_protocol_versions()?
         .with_no_client_auth()
