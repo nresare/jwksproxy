@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::error::AppError;
 use anyhow::Context;
 use arc_swap::ArcSwap;
+use authzoo_server::shutdown;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::response::Response;
@@ -20,10 +21,11 @@ use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tower_http::trace::{self, TraceLayer};
 use tracing::Level;
@@ -85,9 +87,9 @@ struct OpenidConfig {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let log_filter = if cli.debug {
-        "jwksproxy=debug,tower_http=info,axum::rejection=trace"
+        "jwksproxy=debug,authzoo_server=info,tower_http=info,axum::rejection=trace"
     } else {
-        "jwksproxy=info,tower_http=info,axum::rejection=info"
+        "jwksproxy=info,authzoo_server=info,tower_http=info,axum::rejection=info"
     };
     tracing_subscriber::registry()
         .with(EnvFilter::new(log_filter))
@@ -103,6 +105,17 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    let signals = shutdown::Signals::new().context("could not register shutdown signals")?;
+    let signal = signals.wait();
+    tokio::pin!(signal);
+    let (listener, app, tls) = tokio::select! {
+        result = prepare(cli) => result?,
+        () = &mut signal => return Ok(()),
+    };
+    serve(listener, app, tls, signal, shutdown::GRACE_PERIOD).await
+}
+
+async fn prepare(cli: Cli) -> anyhow::Result<(TcpListener, Router, Option<RustlsConfig>)> {
     tls::install_crypto_provider();
     let config = Config::load(&cli.config_path)?;
     config.validate()?;
@@ -136,7 +149,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let app = build_router(state);
     let listener = TcpListener::bind(bind_address).await?;
     info!(address = %bind_address, "listening");
-    serve(listener, app, tls).await
+    Ok((listener, app, tls))
 }
 
 fn build_router(state: AppState) -> Router {
@@ -156,13 +169,35 @@ async fn serve(
     listener: TcpListener,
     app: Router,
     tls: Option<RustlsConfig>,
+    signal: impl Future<Output = ()>,
+    grace_period: Duration,
 ) -> anyhow::Result<()> {
     if let Some(tls) = tls {
-        axum_server::from_tcp_rustls(listener.into_std()?, tls)?
-            .serve(app.into_make_service())
-            .await?;
+        let handle = axum_server::Handle::new();
+        let server = axum_server::from_tcp_rustls(listener.into_std()?, tls)?
+            .handle(handle.clone())
+            .serve(app.into_make_service());
+        shutdown::drain(
+            server,
+            signal,
+            || handle.graceful_shutdown(None),
+            grace_period,
+        )
+        .await?;
     } else {
-        axum::serve(listener, app).await?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let server = axum::serve(listener, app).with_graceful_shutdown(async {
+            let _ = rx.await;
+        });
+        shutdown::drain(
+            server.into_future(),
+            signal,
+            || {
+                let _ = tx.send(());
+            },
+            grace_period,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -300,6 +335,119 @@ mod tests {
         );
     }
 
+    async fn exercise_shutdown(tls_enabled: bool, finish_request: bool) -> anyhow::Result<()> {
+        use super::*;
+        use tokio::sync::{Notify, oneshot};
+
+        tls::install_crypto_provider();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let app = Router::new().route(
+            "/",
+            get({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        "finished"
+                    }
+                }
+            }),
+        );
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/tls");
+        let tls = if tls_enabled {
+            Some(
+                authzoo_server::tls::load(
+                    &fixtures.join("cert.pem"),
+                    &fixtures.join("test-only-key.pem"),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let (signal_tx, signal_rx) = oneshot::channel();
+        let grace = if finish_request {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_millis(100)
+        };
+        let server = tokio::spawn(serve(
+            listener,
+            app,
+            tls,
+            async {
+                signal_rx.await.unwrap();
+            },
+            grace,
+        ));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .tls_certs_only([reqwest::Certificate::from_pem(include_bytes!(
+                "../tests/tls/cert.pem"
+            ))?])
+            .build()?;
+        let scheme = if tls_enabled { "https" } else { "http" };
+        let mut request = tokio::spawn(async move {
+            client
+                .get(format!("{scheme}://localhost:{}/", address.port()))
+                .send()
+                .await?
+                .text()
+                .await
+        });
+        tokio::select! {
+            () = entered.notified() => {},
+            result = &mut request => anyhow::bail!("request ended before entering handler: {result:?}"),
+        }
+        let started = Instant::now();
+        signal_tx.send(()).unwrap();
+        if finish_request {
+            // The server must keep running until the active request finishes.
+            let mut server = server;
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut server)
+                    .await
+                    .is_err()
+            );
+            release.notify_one();
+            assert_eq!((&mut request).await??, "finished");
+            server.await??;
+        } else {
+            server.await??;
+            assert!(started.elapsed() >= grace);
+            request.abort();
+            let _ = request.await;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_and_https_drain_requests_and_bound_shutdown() -> anyhow::Result<()> {
+        use anyhow::Context;
+        for tls_enabled in [false, true] {
+            for finish_request in [false, true] {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    exercise_shutdown(tls_enabled, finish_request),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "shutdown timed out: tls={tls_enabled}, finish_request={finish_request}"
+                    )
+                })??;
+            }
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn fetch_jwks_adds_x5c_only_when_enabled() -> anyhow::Result<()> {
         use super::*;
@@ -386,7 +534,13 @@ mod tests {
             };
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            let task = tokio::spawn(serve(listener, build_router(state), tls));
+            let task = tokio::spawn(serve(
+                listener,
+                build_router(state),
+                tls,
+                std::future::pending(),
+                shutdown::GRACE_PERIOD,
+            ));
             for http2 in [false, true] {
                 if http2 && !enabled {
                     continue;
