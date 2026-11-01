@@ -36,6 +36,13 @@ with TLS and `0.0.0.0:8080` otherwise; an explicit `bind_address` overrides eith
 one. Invalid, incomplete, or mismatched TLS settings fail startup before contacting
 the Kubernetes API.
 
+## Building
+
+TLS uses [Graviola](https://github.com/ctz/graviola), which requires no C compiler
+or external assembler. It supports x86-64 and AArch64 with the CPU features listed
+in Graviola's platform requirements; older CPUs may not be supported. The normal
+Rust target linker is still required.
+
 ## Running
 
 ```sh

@@ -56,7 +56,6 @@ struct Cli {
 struct AppState {
     config: Arc<Config>,
     client: reqwest::Client,
-    certificates: Arc<certificates::Certificates>,
     jwks_cache: Arc<ArcSwap<CachedJwks>>,
 }
 
@@ -104,20 +103,20 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    tls::install_crypto_provider();
     let config = Config::load(&cli.config_path)?;
     config.validate()?;
     let bind_address: SocketAddr = config.bind_address().parse()?;
     let tls = tls::load(&config, Path::new(&cli.config_path)).await?;
     let client = kubernetes::configure_in_cluster_client(reqwest::Client::builder())?.build()?;
 
-    let certificates = Arc::new(certificates::Certificates::new(config.emit_x5c)?);
     let cluster_openid_config_endpoint = config.cluster_openid_config_endpoint();
     let jwks_uri = discover_cluster_jwks_uri(&client, &cluster_openid_config_endpoint)
         .await
         .with_context(|| {
             format!("failed to discover cluster JWKS URI from '{cluster_openid_config_endpoint}'")
         })?;
-    let jwks_cache = fetch_jwks(&client, &jwks_uri, &certificates)
+    let jwks_cache = fetch_jwks(&client, &jwks_uri, config.emit_x5c)
         .await
         .with_context(|| format!("failed to fetch cluster JWKS from '{jwks_uri}'"))?;
 
@@ -132,7 +131,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let state = AppState {
         config: Arc::new(config),
         client,
-        certificates,
         jwks_cache: Arc::new(ArcSwap::from_pointee(jwks_cache)),
     };
     let app = build_router(state);
@@ -195,7 +193,7 @@ async fn keys(State(state): State<AppState>) -> Result<Response, AppError> {
 
     if should_refresh {
         debug!(cluster_jwks_uri = %jwks_uri, "refreshing cached cluster JWKS");
-        match fetch_jwks(&state.client, &jwks_uri, &state.certificates).await {
+        match fetch_jwks(&state.client, &jwks_uri, state.config.emit_x5c).await {
             Ok(refreshed_cache) => {
                 state.jwks_cache.store(Arc::new(refreshed_cache));
             }
@@ -236,7 +234,7 @@ async fn discover_cluster_jwks_uri(
 async fn fetch_jwks(
     client: &reqwest::Client,
     jwks_uri: &str,
-    certificates: &certificates::Certificates,
+    emit_x5c: bool,
 ) -> anyhow::Result<CachedJwks> {
     let upstream_response = client.get(jwks_uri).send().await?;
     let status = upstream_response.status();
@@ -244,10 +242,15 @@ async fn fetch_jwks(
         anyhow::bail!("cluster JWKS endpoint returned HTTP {}", status.as_u16());
     }
     let upstream_body = upstream_response.bytes().await?;
+    let body = if emit_x5c {
+        certificates::add_x5c(&upstream_body)?.into()
+    } else {
+        upstream_body
+    };
 
     Ok(CachedJwks {
         jwks_uri: jwks_uri.to_string(),
-        body: certificates.transform(&upstream_body)?.into(),
+        body,
         fetched_at: Instant::now(),
     })
 }
@@ -298,10 +301,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_jwks_adds_x5c_only_when_enabled() -> anyhow::Result<()> {
+        use super::*;
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        let signing_key = p256::ecdsa::SigningKey::from_slice(&[1; 32])?;
+        let point = signing_key.verifying_key().to_sec1_point(false);
+        let document = json!({"keys": [{
+            "kty": "EC", "crv": "P-256",
+            "x": URL_SAFE_NO_PAD.encode(point.x().unwrap()),
+            "y": URL_SAFE_NO_PAD.encode(point.y().unwrap())
+        }]});
+        let upstream_body = serde_json::to_vec_pretty(&document)?;
+        let response_body = upstream_body.clone();
+        let upstream = Router::new().route(
+            "/jwks",
+            get(move || {
+                let body = response_body.clone();
+                async move { body }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let jwks_uri = format!("http://{}/jwks", listener.local_addr()?);
+        let task = tokio::spawn(async move { axum::serve(listener, upstream).await });
+        tls::install_crypto_provider();
+        let client = reqwest::Client::builder().no_proxy().build()?;
+
+        let result = async {
+            let unmodified = fetch_jwks(&client, &jwks_uri, false).await?;
+            assert_eq!(unmodified.body.as_ref(), upstream_body.as_slice());
+
+            let modified = fetch_jwks(&client, &jwks_uri, true).await?;
+            let mut output: Value = serde_json::from_slice(&modified.body)?;
+            let x5c = output["keys"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("x5c")
+                .unwrap();
+            assert_eq!(x5c.as_array().unwrap().len(), 1);
+            assert!(!x5c[0].as_str().unwrap().is_empty());
+            assert_eq!(output, document);
+            anyhow::Ok(())
+        }
+        .await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        result
+    }
+
+    #[tokio::test]
     async fn serves_oidc_and_jwks_over_http_and_https() {
         use super::*;
         use rustls::pki_types::{CertificateDer, pem::PemObject};
 
+        tls::install_crypto_provider();
         for enabled in [false, true] {
             let settings = if enabled {
                 "tls_cert_path = 'cert.pem'\ntls_key_path = 'test-only-key.pem'"
@@ -325,7 +378,6 @@ mod tests {
             let state = AppState {
                 config: Arc::new(config),
                 client: reqwest::Client::new(),
-                certificates: Arc::new(certificates::Certificates::new(false).unwrap()),
                 jwks_cache: Arc::new(ArcSwap::from_pointee(CachedJwks {
                     jwks_uri: "https://kubernetes.default.svc/openid/v1/jwks".into(),
                     body: Bytes::from_static(b"{\"keys\":[]}"),
@@ -352,7 +404,7 @@ mod tests {
                         )
                         .unwrap();
                     let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-                        rustls::crypto::ring::default_provider(),
+                        rustls_graviola::default_provider(),
                     ))
                     .with_safe_default_protocol_versions()
                     .unwrap()

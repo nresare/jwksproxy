@@ -11,7 +11,6 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM rust:slim-trixie AS builder
 WORKDIR /build
-RUN apt update && apt install -y libssl-dev pkgconf
 COPY --from=planner /bin/cargo-chef /bin/cargo-chef
 COPY --from=planner /build/recipe.json recipe.json
 
