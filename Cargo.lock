@@ -90,7 +90,7 @@ checksum = "a8f50e70131bc07455985df8cee107a0f36f0f31730240ca3b3fabd3e1696efe"
 dependencies = [
  "anyhow",
  "axum",
- "axum-server",
+ "axum-server 0.8.0",
  "rustls",
  "rustls-graviola",
  "tokio",
@@ -172,6 +172,29 @@ dependencies = [
  "pin-project-lite",
  "rustls",
  "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tower-service",
+]
+
+[[package]]
+name = "axum-server"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3766086d344b8f8d2a9cf6fb211b581de5b160e052d7bc75a92e58cc41909054"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "either",
+ "fs-err",
+ "http",
+ "http-body",
+ "hyper",
+ "hyper-util",
+ "pin-project-lite",
+ "rustls",
+ "rustls-pki-types",
+ "socket2",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -994,7 +1017,7 @@ dependencies = [
  "arc-swap",
  "authzoo-server",
  "axum",
- "axum-server",
+ "axum-server 0.9.2",
  "base64",
  "clap",
  "p256",
